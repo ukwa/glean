@@ -7,20 +7,65 @@ services:
    environment:
      - "http_proxy=http://warcprox:8000"
      - "https_proxy=http://warcprox:8000"
-   command: scrapy crawl govukpub
+   command: sh -c "sleep 10 ; scrapy crawl govukpub"
 
   # WARC Proxy, with de-duplication disabled and a rapid rollover:
   warcprox:
     image: ukwa/warcprox #:2.0-py36-alpine
-    command: "warcprox -b 0.0.0.0 -d /warcprox/warcs --base32 --gzip --rollover-idle-time 600 --dedup-db-file /dev/null --stats-db-file /dev/null --quiet"
+    command: "warcprox -b 0.0.0.0 -d /output/warcs --base32 --gzip --rollover-idle-time 600 --dedup-db-file /dev/null --stats-db-file /dev/null --quiet --plugin warcprox-plugins.listeners.UpdateOutbackCDX"
     environment:
       - "LC_ALL=en_US.utf8"
       - "TMP=/tmp/warcprox"
+      - "CDXSERVER_ENDPOINT=http://cdxserver:8080/fc"
     ports:
       - "8000:8000"
     ulimits:
       nproc: 2000 # See https://github.com/internetarchive/warcprox/blob/2.x/warcprox/warcproxy.py#L413
+    volumes_from:
+      - dvc:rw
+
+  # OutbackCDX
+  cdxserver:
+    image: ukwa/tinycdxserver
+    command: "java -jar outbackcdx.jar -d /cdx-data -p 8080 -b 0.0.0.0"
+    ports:
+      - "9090:8080"
     volumes:
-      - ./testing/warcs:/warcprox/warcs
+      - ./testing/cdx:/cdx-data
+
+  # Data Volume Container for crawler job definitions and outputs
+  dvc:
+    image: busybox
+    volumes:
+      - ./testing/warcs:/output/warcs
 
 
+  # ----------------------------------------------
+  # Wayback Access
+  # ----------------------------------------------
+  warc-server:
+    image: ukwa/warc-server
+    ports:
+      - 8001:8000
+    environment:
+      - "WARC_PATHS=/output/warcs"
+    volumes_from:
+      - dvc:ro
+
+  # OpenWayback for playback
+  openwayback:
+    image: ukwa/waybacks
+    ports:
+      - "8080:8080"
+      - "8090:8090"
+    environment:
+      - "UKWA_OWB_VERSION=qa"
+      - "WAYBACK_URL_PORT=8080"
+      - "WAYBACK_PROXY_PORT=8090"
+      - "CDX_WHITELIST="
+      - "WAYBACK_EXCLUDE_FILE=/usr/local/tomcat/webapps/ROOT/WEB-INF/classes/exclude.txt"
+      - "WAYBACK_EMBARGO=0"
+      - "WAYBACK_HTTPFS_PREFIX=http://warc-server:8000/by-filename/"
+      - "CDX_INDEX_SERVER=http://cdxserver:8080/fc"
+      - "WAYBACK_URL_PREFIX=http://localhost:8080"
+      - "WAYBACK_URL_HOST=localhost"
